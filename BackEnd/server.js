@@ -11,6 +11,7 @@ const goldenTemplateService = require('./services/goldenTemplateService');
 const { fetchReviewHistory } = require('./services/tpaHistoryService');
 const cycleTimeService = require('./services/cycleTimeService');
 const firstPassYieldService = require('./services/firstPassYieldService');
+const routingService = require('./services/routingService');
 const aiPredictionService = require('./services/aiPredictionService');
 
 require('dotenv').config({ path: path.join(__dirname, '..', 'config', 'credentials', 'automation.env') });
@@ -309,6 +310,20 @@ app.get('/api/first-pass-yield/summary', async (req, res) => {
   try {
     const { from, to, model, environment } = req.query;
     res.json(await firstPassYieldService.getFpySummary({ from, to, model, environment }));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── API: Routing — Model picker options (model + customer) from SFCS ───────
+//
+// Powers the Routing page's Model selector: distinct (model, customer) pairs
+// from wymysfcs.sfcmodel, for the dropdown, plus the standalone customer list
+// used to narrow it. See services/routingService.js.
+app.get('/api/routing/models', async (req, res) => {
+  try {
+    res.json(await routingService.getModelOptions());
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
