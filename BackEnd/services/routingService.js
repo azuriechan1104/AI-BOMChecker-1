@@ -37,21 +37,26 @@ const CATEGORIZED_ROUTES_CTE = String.raw`
                                                     substring(description FROM '(?i)L\d+'),
                                                     'OSV FIXTURE'
                                                  )
-        -- 5. DYNAMIC TETON / T2PDS / T3PDS PLATFORMS
-        WHEN description ~* 'TETON|T2PDS|T3PDS' THEN
+        -- 5. DYNAMIC T2PDS / T3PDS PLATFORMS
+        WHEN description ~* 'T2PDS|T3PDS' THEN
             concat_ws(' ',
-                substring(description FROM '(?i)L\d+'),
+                -- 1. Level Fallback (Defaults to L11 for RACK, L10 otherwise)
                 COALESCE(
-                    UPPER(substring(description FROM '(?i)TETON\d*')),
-                    UPPER(substring(description FROM '(?i)T\d+PDS')),
-                    'TETON'
+                    substring(description FROM '(?i)\mL\d+\M'),
+                    CASE
+                        WHEN description ~* 'RACK' THEN 'L11'
+                        ELSE 'L10'
+                    END
                 ),
+                -- 2. Direct Platform Extraction (Guaranteed to match T2PDS or T3PDS)
+                UPPER(substring(description FROM '(?i)\mT\d+PDS\M')),
+                -- 3. Sub-type Suffix
                 CASE
-                    WHEN description ~* 'RPM' THEN 'RPM'
-                    WHEN description ~* 'HEADNODE|\bHN\b' THEN 'HEADNODE'
-                    WHEN description ~* 'RACK' THEN 'RACK'
-                    WHEN description ~* 'JBOG' THEN 'JBOG'
-                    WHEN description ~* 'SLED' THEN 'SLED'
+                    WHEN description ~* '\mRPM\M'         THEN 'RPM'
+                    WHEN description ~* 'HEADNODE|\mHN\M' THEN 'HEADNODE'
+                    WHEN description ~* '\mRACK\M'        THEN 'RACK'
+                    WHEN description ~* '\mJBOG\M'        THEN 'JBOG'
+                    WHEN description ~* '\mSLED\M'        THEN 'SLED'
                 END
             )
         -- 6. PROJECT SPECIFIC RULES (EXO-MBX, NANAKA, BF, PENROSE)
@@ -87,10 +92,33 @@ const CATEGORIZED_ROUTES_CTE = String.raw`
                                                     ),
                                                     'NANAKA'
                                                  )
-        WHEN description ~* 'TETON\s*PRIME'   THEN concat_ws(' ',
-                                                    substring(description FROM '(?i)L\d+'),
-                                                    'TETON'
-                                                 )
+        -- TETON Family Rule (Handles TETON / TETON2 / T2PDS / T3PDS + Sub-types)
+        WHEN description ~* 'TETON|T2PDS|T3PDS' THEN
+            concat_ws(' ',
+                -- 1. Level Fallback
+                COALESCE(
+                    substring(description FROM '(?i)\mL\d+\M'),
+                    CASE
+                        WHEN description ~* 'RACK' THEN 'L11'
+                        ELSE 'L10'
+                    END
+                ),
+                -- 2. Platform Extraction
+                CASE
+                    WHEN description ~* '\mTETON2\M' THEN 'TETON2'
+                    WHEN description ~* '\mT2PDS\M'  THEN 'T2PDS'
+                    WHEN description ~* '\mT3PDS\M'  THEN 'T3PDS'
+                    ELSE 'TETON'
+                END,
+                -- 3. Sub-type Suffix (Flexible matching for prefixes like JBOG_SAM)
+                CASE
+                    WHEN description ~* 'RPM'             THEN 'RPM'
+                    WHEN description ~* 'HEADNODE|\mHN\M' THEN 'HEADNODE'
+                    WHEN description ~* 'RACK'            THEN 'RACK'
+                    WHEN description ~* 'JBOG'            THEN 'JBOG'
+                    WHEN description ~* 'SLED'            THEN 'SLED'
+                END
+            )
         WHEN description ~* '\mBF(21)?\M'      THEN concat_ws(' ',
                                                     COALESCE(
                                                         substring(description FROM '(?i)\mL\d+\M'),
