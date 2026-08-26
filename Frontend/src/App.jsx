@@ -15,6 +15,7 @@ import GoldenTemplatePage from './components/GoldenTemplatePage'
 import CrdTrackerPage from './components/CrdTrackerPage'
 import MsftProjectsPage from './components/MsftProjectsPage'
 import NpiLibraryPage from './components/NpiLibraryPage'
+import RoutingPage from './components/RoutingPage'
 import AiDashboardPage from './components/AiDashboardPage'
 import BomguardWorkflowPage from './components/BomguardWorkflowPage'
 
@@ -38,6 +39,7 @@ const PAGES = [
     children: [
       { id: 'crd-tracker', label: 'CRD Tracker' },
       { id: 'npi-library', label: 'NPI Library' },
+      { id: 'routing',     label: 'Routing' },
     ],
   },
   { id: 'msft-projects', label: 'MSFT Projects' },
@@ -110,6 +112,8 @@ export default function App() {
       {activePage === 'msft-projects' && <MsftProjectsPage />}
 
       {activePage === 'npi-library' && <NpiLibraryPage />}
+
+      {activePage === 'routing' && <RoutingPage />}
 
       {activePage === 'bomguard-workflow' && <BomguardWorkflowPage />}
 

@@ -910,6 +910,47 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 1rem 0; 
 .fpy-summary-table th:not(:first-child), .fpy-summary-table td:not(:first-child) { text-align: right; }
 .fpy-total-row td { border-top: 2px solid var(--border2); font-weight: 700; }
 
+.pivot-count-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+.pivot-count-btn:hover { text-decoration: underline; }
+
+/* Excel-style gridlines — the app's default tables only draw a bottom
+   border per row, but a wide pivot needs column separators too. */
+.pivot-table th, .pivot-table td { border: 1px solid var(--border); }
+
+/* Excel "Angle Counterclockwise" header style: text pivots up from the
+   cell's bottom-left corner, ascending left-to-right at 45°.
+   A rotated label reaches 0.707*(width + height) above its pivot, so the
+   row must be tall enough for the LONGEST label or it gets clipped at the
+   top. `max-width` wraps long names ("L10 TETON2 HEADNODE") onto two or
+   three lines instead of letting one run overshoot that height. */
+.pivot-th-angled {
+  height: 132px;
+  padding: 0 .3rem .5rem;
+  text-align: center;
+  vertical-align: bottom;
+}
+.pivot-th-angled span {
+  display: inline-block;
+  max-width: 7rem;
+  transform: rotate(-45deg);
+  transform-origin: bottom left;
+  white-space: normal;
+  text-align: left;
+  line-height: 1.3;
+}
+
+/* Route stays upright (unlike the angled category headers) and centered,
+   both the header and every value below it in that column. */
+.pivot-th-route { text-align: center; vertical-align: middle; }
+.pivot-route-cell { text-align: center; }
+
 .fpy-chart-title {
   font-size: .68rem;
   font-weight: 800;

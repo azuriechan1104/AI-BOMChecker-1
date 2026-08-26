@@ -11,6 +11,7 @@ const goldenTemplateService = require('./services/goldenTemplateService');
 const { fetchReviewHistory } = require('./services/tpaHistoryService');
 const cycleTimeService = require('./services/cycleTimeService');
 const firstPassYieldService = require('./services/firstPassYieldService');
+const routingService = require('./services/routingService');
 const aiPredictionService = require('./services/aiPredictionService');
 
 require('dotenv').config({ path: path.join(__dirname, '..', 'config', 'credentials', 'automation.env') });
@@ -309,6 +310,49 @@ app.get('/api/first-pass-yield/summary', async (req, res) => {
   try {
     const { from, to, model, environment } = req.query;
     res.json(await firstPassYieldService.getFpySummary({ from, to, model, environment }));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── API: Routing — Customer picker options from SFCS ────────────────────────
+//
+// Powers the Routing page's Customer selector: every customer with at least
+// one sfcupnroute row. See services/routingService.js.
+app.get('/api/routing/models', async (req, res) => {
+  try {
+    res.json(await routingService.getModelOptions());
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── API: Routing — Summary pivot (route x category, count) for a Customer ──
+//
+// Powers the Routing page's summary table: every sfcupnroute row for the
+// given Customer, categorized by its sfcmodel.description, pivoted route
+// (rows) x category (columns) with count of routes as the value. See
+// services/routingService.js.
+app.get('/api/routing/summary', async (req, res) => {
+  try {
+    res.json(await routingService.getRoutingSummary(req.query.customer));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── API: Routing — Detail drill-through for one pivot cell ─────────────────
+//
+// Powers the click-through on a Routing Summary pivot cell: the raw
+// sfcupnroute rows (modelfamily, category, upn, description, route,
+// updatetime) behind that Customer + Route + Category combination —
+// downloadable client-side as CSV. See services/routingService.js.
+app.get('/api/routing/detail', async (req, res) => {
+  try {
+    res.json({ rows: await routingService.getRoutingDetail(req.query.customer, req.query.route, req.query.category) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
