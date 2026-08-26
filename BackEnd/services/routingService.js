@@ -16,7 +16,7 @@ const CATEGORIZED_ROUTES_CTE = String.raw`
         WHEN description ~* 'KIN\s+RACK.*FRU' THEN 'rack FRU'
         WHEN description ~* 'HD\s+MP'          THEN 'HD MP'
         WHEN description ~* 'YV3\.5'           THEN 'YV3.5'
-        WHEN description ~* '\mDC-?SCM\M'     THEN 'DCSCM'
+        WHEN description ~* '\m(?:DC-?)?SCM\M' THEN 'DCSCM'
         -- 2. CABLE ASSEMBLIES
         WHEN description ~* 'EXT\s+C\.A\s+LAN' THEN 'AEC CABLE'
         -- 3. ZBOX TEST FIXTURES (Evaluated BEFORE standard TETON to catch fixture hardware)
@@ -60,27 +60,6 @@ const CATEGORIZED_ROUTES_CTE = String.raw`
                 END
             )
         -- 6. PROJECT SPECIFIC RULES (EXO-MBX, NANAKA, BF, PENROSE)
-        -- Dynamic Gen7 / G7 version check (Handles G7.1, G7.2, GEN7.4, etc.)
-        WHEN description ~* 'G(?:EN)?7\.\d+'   THEN concat_ws(' ',
-                                                    COALESCE(
-                                                        substring(description FROM '(?i)\mL\d+\M'),
-                                                        CASE
-                                                            WHEN description ~* 'RACK' THEN 'L11'
-                                                            ELSE 'L10'
-                                                        END
-                                                    ),
-                                                    INITCAP(substring(description FROM '(?i)G(?:EN)?7\.\d+'))
-                                                 )
-        WHEN description ~* 'EXO-MBX|MBX'     THEN concat_ws(' ',
-                                                    COALESCE(
-                                                        substring(description FROM '(?i)\mL\d+\M'),
-                                                        CASE
-                                                            WHEN description ~* 'RACK' THEN 'L11'
-                                                            ELSE 'L10'
-                                                        END
-                                                    ),
-                                                    'Gen7'
-                                                 )
         WHEN description ~* 'NANAKA.*(MOBO|HEATSINK|ASSEMBLY)' THEN 'NANAKA FRU'
         WHEN description ~* 'NANAKA'          THEN concat_ws(' ',
                                                     COALESCE(
@@ -177,25 +156,31 @@ const CATEGORIZED_ROUTES_CTE = String.raw`
                                                     substring(description FROM '(?i)L\d+'),
                                                     regexp_replace(substring(description FROM '(?i)HORNET[A-Z0-9]*'), '(?i)A(\d+)', '\1')
                                                  )
-        -- 10. GENERATION & HARDWARE FALLBACKS
+        -- 10. SPECIFIC HARDWARE MODEL OVERRIDES
         WHEN description ~* '(S2130|S2260|C2030)' THEN concat_ws(' ',
                                                     COALESCE(
-                                                        substring(description FROM '(?i)L\d+'),
-                                                        'L10'
+                                                        substring(description FROM '(?i)\mL\d+\M'),
+                                                        CASE WHEN description ~* 'RACK' THEN 'L11' ELSE 'L10' END
                                                     ),
                                                     'Gen7'
                                                  )
-        WHEN description ~* '\mG\d+(?:\.\d+)?\M' THEN concat_ws(' ',
-                                                substring(description FROM '(?i)L\d+'),
-                                                UPPER(substring(description FROM '(?i)\mG\d+(?:\.\d+)?\M'))
-                                             )
-        WHEN description ~* 'GEN\s*\d+(?:\.\d+)?' THEN concat_ws(' ',
-                                                    substring(description FROM '(?i)L\d+'),
-                                                    'Gen' || regexp_replace(
-                                                        substring(description FROM '(?i)GEN\s*\d+(?:\.\d+)?'),
-                                                        '(?i).*?(\d+(?:\.\d+)?).*',
-                                                        '\1'
-                                                    )
+        WHEN description ~* 'EXO-MBX|MBX'     THEN concat_ws(' ',
+                                                    COALESCE(
+                                                        substring(description FROM '(?i)\mL\d+\M'),
+                                                        CASE WHEN description ~* 'RACK' THEN 'L11' ELSE 'L10' END
+                                                    ),
+                                                    'Gen7'
+                                                 )
+        -- 11. UNIFIED GENERATION EXTRACTOR — one rule in place of the old
+        -- separate G<n> / GEN<n> / Gen7 branches. The leading [A-Z]* lets a
+        -- generation stay glued to a prefix (MPGEN10.4), and the trailing
+        -- capture ignores any suffix (GEN8.1_103, GEN9.1_MSF).
+        WHEN description ~* '(?i)(?:^|[^A-Z0-9])[A-Z]*G(?:EN)?\s*\d+(?:\.\d+)?' THEN concat_ws(' ',
+                                                    COALESCE(
+                                                        substring(description FROM '(?i)\mL\d+\M'),
+                                                        CASE WHEN description ~* 'RACK' THEN 'L11' ELSE 'L10' END
+                                                    ),
+                                                    'Gen' || substring(description FROM '(?i)[A-Z]*G(?:EN)?\s*(\d+(?:\.\d+)?)')
                                                  )
         WHEN description ~* '\m\d+\.\d+\M'
              AND description !~* '\d+(?:\.\d+)?(M|T|G|K|CM|MM|H|W|PD|U)\M'
