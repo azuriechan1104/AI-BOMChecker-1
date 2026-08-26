@@ -204,6 +204,17 @@ const CATEGORIZED_ROUTES_CTE = String.raw`
     end as cust_name
     from wymysfcs.sfcupnroute s
     left join wymysfcs.sfcmodel s2 on s.upn = s2.upn
+    -- Scoped to the model families the NPI team tracks on the Routing page.
+    -- Any other modelfamily is excluded outright, so it affects every
+    -- consumer of this CTE — including the Customer selector, which now
+    -- only lists customers holding routes within these families.
+    where s.modelfamily in (
+      'BPD01U010001', 'BPD033010001', 'BPD02A010001', 'BPD04S010001',
+      'BPD04E010001', 'BPD041010001', 'B10U2310',     'B10D2302',
+      'B1172406',     'BPD04U010001', 'B11X2505',     'B1182407',
+      'B10K2305',     'BPD04G010001', 'BPD04P100001', 'B11O2502',
+      'BPD04Q010001'
+    )
   )
 `;
 
