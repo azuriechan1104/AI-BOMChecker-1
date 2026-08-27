@@ -359,6 +359,22 @@ app.get('/api/routing/detail', async (req, res) => {
   }
 });
 
+// ── API: Routing — Lookup by UPN (part number) ─────────────────────────────
+//
+// Powers the Routing page's UPN search box, the alternative entry point to
+// the Customer selector: every sfcupnroute row whose UPN contains the given
+// text, with its customer/category/route. Unlike the Customer views this is
+// NOT limited to the NPI-tracked model families — see
+// services/routingService.js.
+app.get('/api/routing/upn', async (req, res) => {
+  try {
+    res.json(await routingService.getRoutingByUpn(req.query.upn));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── API: AI Dashboard — Cycle Time (PT) + FPY (MFG/MDAAS) + part info + an
 // Ollama-generated narrative for one Model (GEN token, e.g. "GEN9") + Part Number.
 // See services/aiPredictionService.js for why Model here is the GEN token
