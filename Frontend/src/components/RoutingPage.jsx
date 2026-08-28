@@ -101,10 +101,7 @@ function SummaryPivotTable({ summary, onCellClick }) {
   )
 }
 
-function exportDetailCSV(rows, customer, route, category) {
-  const header = ['Model Family', 'Category', 'UPN', 'Description', 'Route', 'Update Time']
-  const csvRows = rows.map(r => [r.modelfamily, r.category, r.upn, r.description, r.route, r.updatetime])
-
+function downloadCSV(header, csvRows, nameParts) {
   const csv = [header, ...csvRows]
     .map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
     .join('\n')
@@ -112,11 +109,27 @@ function exportDetailCSV(rows, customer, route, category) {
   const blob = new Blob([csv], { type: 'text/csv' })
   const url  = URL.createObjectURL(blob)
   const a    = document.createElement('a')
-  const safeName = [customer, route, category].filter(Boolean).join('-').replace(/[^a-z0-9-]+/gi, '_')
+  const safeName = nameParts.filter(Boolean).join('-').replace(/[^a-z0-9-]+/gi, '_')
   a.href     = url
   a.download = `routing-detail-${safeName || 'export'}.csv`
   a.click()
   URL.revokeObjectURL(url)
+}
+
+function exportDetailCSV(rows, customer, route, category) {
+  downloadCSV(
+    ['Model Family', 'Category', 'UPN', 'Description', 'Route', 'Update Time'],
+    rows.map(r => [r.modelfamily, r.category, r.upn, r.description, r.route, r.updatetime]),
+    [customer, route, category]
+  )
+}
+
+function exportUpnCSV(rows, upn) {
+  downloadCSV(
+    ['UPN', 'Customer', 'Model Family', 'Category', 'Description', 'Route', 'Update Time'],
+    rows.map(r => [r.upn, r.customer, r.modelfamily, r.category, r.description, r.route, r.updatetime]),
+    ['upn', upn]
+  )
 }
 
 // Drill-through modal for one pivot number: the raw sfcupnroute rows behind
@@ -196,6 +209,47 @@ function CellDetailModal({ cell, customer, onClose }) {
   )
 }
 
+// UPN search results: one row per sfcupnroute record whose UPN matched, flat
+// rather than pivoted — a part-number lookup wants the route itself (plus the
+// customer it belongs to), not a count.
+function UpnResultsTable({ rows }) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>UPN</th>
+            <th>Customer</th>
+            <th>Model Family</th>
+            <th>Category</th>
+            <th>Description</th>
+            <th>Route</th>
+            <th>Update Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={`${r.upn}-${r.route}-${i}`}>
+              <td className="mono">{r.upn}</td>
+              <td>{r.customer}</td>
+              <td className="mono">{r.modelfamily}</td>
+              <td>{r.category}</td>
+              <td>{r.description}</td>
+              <td className="mono">{r.route}</td>
+              <td className="mono">{String(r.updatetime ?? '')}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// Mirrors the server's UPN_SEARCH_MIN_LENGTH — below it the box just waits
+// instead of firing a query that would match most of the table.
+const UPN_MIN_LENGTH = 2
+const UPN_DEBOUNCE_MS = 350
+
 export default function RoutingPage() {
   const [customers, setCustomers]   = useState([])
   const [loading, setLoading]       = useState(true)
@@ -211,6 +265,18 @@ export default function RoutingPage() {
 
   const [detailCell, setDetailCell] = useState(null) // { route, category }
 
+  // The UPN box is the page's second entry point: search a part number
+  // directly instead of drilling down from a customer.
+  const [upnInput, setUpnInput]       = useState('')
+  const [upnResult, setUpnResult]     = useState(null)
+  const [upnLoading, setUpnLoading]   = useState(false)
+  const [upnError, setUpnError]       = useState(null)
+  const upnAbortRef = useRef(null)
+
+  const upnTyped   = upnInput.trim()
+  const upnMode    = upnTyped.length > 0
+  const upnSearchable = upnTyped.length >= UPN_MIN_LENGTH
+
   useEffect(() => {
     fetch('/api/routing/models')
       .then(async res => {
@@ -223,6 +289,43 @@ export default function RoutingPage() {
   }, [])
 
   useEffect(() => () => abortRef.current?.abort(), [])
+  useEffect(() => () => upnAbortRef.current?.abort(), [])
+
+  // Debounced so a part number typed character by character issues one query
+  // at the end rather than one per keystroke.
+  useEffect(() => {
+    upnAbortRef.current?.abort()
+    if (!upnSearchable) {
+      setUpnResult(null)
+      setUpnError(null)
+      setUpnLoading(false)
+      return
+    }
+
+    setUpnLoading(true)
+    const timer = setTimeout(() => {
+      const controller = new AbortController()
+      upnAbortRef.current = controller
+
+      setUpnResult(null)
+      setUpnError(null)
+      fetch(`/api/routing/upn?upn=${encodeURIComponent(upnTyped)}`, { signal: controller.signal })
+        .then(async res => {
+          const json = await res.json()
+          if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+          setUpnResult(json)
+        })
+        .catch(e => {
+          if (e.name === 'AbortError') return
+          setUpnError('Network error: ' + e.message)
+        })
+        // An aborted request means a newer search already took over and set
+        // its own loading state — don't clear the spinner out from under it.
+        .finally(() => { if (!controller.signal.aborted) setUpnLoading(false) })
+    }, UPN_DEBOUNCE_MS)
+
+    return () => clearTimeout(timer)
+  }, [upnTyped, upnSearchable])
 
   // Auto-resolve: no submit button — as soon as the typed/clicked text
   // exactly matches a known customer (case-insensitive), pull the summary.
@@ -265,7 +368,10 @@ export default function RoutingPage() {
           {loading && <StateBox type="loading" title="Loading Customers…" message="Querying SFCS for the customer list." />}
           {!loading && error && <StateBox type="error" message={error} />}
 
-          {!loading && !error && (
+          {/* Shown even when the customer list failed to load: the UPN search
+              doesn't depend on it, so a broken selector shouldn't take the
+              part-number lookup down with it. */}
+          {!loading && (
             <div className="comparison-toolbar">
               <span className="filter-hint">Customer</span>
               <ComboInput
@@ -274,29 +380,90 @@ export default function RoutingPage() {
                 options={customers}
                 placeholder="Type or choose a customer…"
               />
+              <span className="filter-hint">or UPN</span>
+              <div className="col-filter">
+                <input
+                  type="text"
+                  value={upnInput}
+                  placeholder="Type a part number…"
+                  onChange={e => setUpnInput(e.target.value)}
+                />
+              </div>
+              {upnMode && (
+                <button type="button" className="filter-btn" onClick={() => setUpnInput('')}>
+                  Clear UPN
+                </button>
+              )}
             </div>
           )}
         </section>
 
-        {!loading && !error && !resolvedCustomer && (
+        {/* A UPN search takes over the results area while it has text in it —
+            the two searches answer different questions, so showing both a
+            pivot and a part-number hit list at once would just be noise.
+            Clearing the box returns to the selected customer's summary. */}
+        {upnMode && (
+          <>
+            {!upnSearchable && (
+              <StateBox
+                type="empty"
+                title="Keep Typing…"
+                message={`Enter at least ${UPN_MIN_LENGTH} characters of a part number to search.`}
+              />
+            )}
+
+            {upnSearchable && upnLoading && (
+              <StateBox type="loading" title="Searching UPNs…" message={`Querying SFCS for part numbers matching “${upnTyped}”.`} />
+            )}
+
+            {upnSearchable && !upnLoading && upnError && <StateBox type="error" message={upnError} />}
+
+            {upnSearchable && !upnLoading && !upnError && upnResult && upnResult.rows.length === 0 && (
+              <StateBox
+                type="empty"
+                title="No Routes Found"
+                message={`No sfcupnroute rows have a UPN containing “${upnTyped}”.`}
+              />
+            )}
+
+            {upnSearchable && !upnLoading && !upnError && upnResult && upnResult.rows.length > 0 && (
+              <>
+                <h3 className="fpy-chart-title">Routing by UPN — “{upnTyped}”</h3>
+                <div className="comparison-toolbar" style={{ margin: '0 0 .5rem' }}>
+                  <span className="filter-hint">
+                    {upnResult.rows.length} {upnResult.rows.length === 1 ? 'route' : 'routes'}
+                    {upnResult.truncated && ` (first ${upnResult.limit} — narrow the search to see the rest)`}
+                    {' · matches any UPN containing the text, across all model families'}
+                  </span>
+                  <button type="button" className="filter-btn" onClick={() => exportUpnCSV(upnResult.rows, upnTyped)}>
+                    Export CSV
+                  </button>
+                </div>
+                <UpnResultsTable rows={upnResult.rows} />
+              </>
+            )}
+          </>
+        )}
+
+        {!upnMode && !loading && !error && !resolvedCustomer && (
           <StateBox
             type="empty"
-            title="Select a Customer to Begin"
-            message="Type or pick a customer above — the summary loads automatically."
+            title="Select a Customer or Search a UPN to Begin"
+            message="Type or pick a customer for its routing summary, or enter a part number in the UPN box — results load automatically."
           />
         )}
 
-        {resolvedCustomer && summaryLoading && (
+        {!upnMode && resolvedCustomer && summaryLoading && (
           <StateBox type="loading" title="Building Routing Summary…" message={`Querying SFCS for ${resolvedCustomer}.`} />
         )}
 
-        {resolvedCustomer && !summaryLoading && summaryError && <StateBox type="error" message={summaryError} />}
+        {!upnMode && resolvedCustomer && !summaryLoading && summaryError && <StateBox type="error" message={summaryError} />}
 
-        {resolvedCustomer && !summaryLoading && !summaryError && summary && summary.routes.length === 0 && (
+        {!upnMode && resolvedCustomer && !summaryLoading && !summaryError && summary && summary.routes.length === 0 && (
           <StateBox type="empty" title="No Routes Found" message={`No sfcupnroute rows were found for ${resolvedCustomer}.`} />
         )}
 
-        {resolvedCustomer && !summaryLoading && !summaryError && summary && summary.routes.length > 0 && (
+        {!upnMode && resolvedCustomer && !summaryLoading && !summaryError && summary && summary.routes.length > 0 && (
           <>
             <h3 className="fpy-chart-title">Routing Summary — {resolvedCustomer}</h3>
             <p className="filter-hint" style={{ margin: '0 0 .5rem' }}>Click any number — including row/column/grand totals — to see its underlying routes.</p>

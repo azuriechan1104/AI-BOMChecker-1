@@ -7,9 +7,9 @@ const { sfcsPool } = require('../DB');
 // "Generic", both really mean "KINABALU"). String.raw keeps every
 // `\d`/`\s`/`\m`/`\M` regex escape intact — a plain template literal would
 // silently eat the backslashes (`"\d"` -> `"d"`), corrupting every pattern
-// below.
-const CATEGORIZED_ROUTES_CTE = String.raw`
-  with categorized as (
+// below. Wrapped into a `categorized` CTE below — either scoped to the
+// tracked model families or not, depending on the caller.
+const CATEGORIZED_ROUTES_SELECT = String.raw`
     select s.modelfamily, s.upn, s2.model, s2.customer, s2.description, s.route, s.updatetime,
     CASE
         -- 1. FIXED LITERALS & SPECIAL FLAGS
@@ -204,10 +204,13 @@ const CATEGORIZED_ROUTES_CTE = String.raw`
     end as cust_name
     from wymysfcs.sfcupnroute s
     left join wymysfcs.sfcmodel s2 on s.upn = s2.upn
-    -- Scoped to the model families the NPI team tracks on the Routing page.
-    -- Any other modelfamily is excluded outright, so it affects every
-    -- consumer of this CTE — including the Customer selector, which now
-    -- only lists customers holding routes within these families.
+`;
+
+// Scoped to the model families the NPI team tracks on the Routing page. Any
+// other modelfamily is excluded outright, so it affects every consumer of
+// CATEGORIZED_ROUTES_CTE — including the Customer selector, which only lists
+// customers holding routes within these families.
+const TRACKED_MODEL_FAMILIES_FILTER = `
     where s.modelfamily in (
       'BPD01U010001', 'BPD033010001', 'BPD02A010001', 'BPD04S010001',
       'BPD04E010001', 'BPD041010001', 'B10U2310',     'B10D2302',
@@ -215,8 +218,18 @@ const CATEGORIZED_ROUTES_CTE = String.raw`
       'B10K2305',     'BPD04G010001', 'BPD04P100001', 'B11O2502',
       'BPD04Q010001'
     )
-  )
 `;
+
+// The Customer-driven views (selector, summary pivot, cell drill-through) all
+// work off the tracked-model-family slice.
+const CATEGORIZED_ROUTES_CTE = `with categorized as (${CATEGORIZED_ROUTES_SELECT}${TRACKED_MODEL_FAMILIES_FILTER})`;
+
+// UPN lookup deliberately drops the family filter: someone searching a
+// specific part number wants that part's route wherever it lives, and
+// silently hiding a real sfcupnroute row because its modelfamily isn't on
+// the NPI team's tracked list would read as missing data. modelfamily is a
+// column in the results so out-of-scope hits stay recognizable.
+const ALL_CATEGORIZED_ROUTES_CTE = `with categorized as (${CATEGORIZED_ROUTES_SELECT})`;
 
 // Customer list for the Routing page's Customer selector: every cust_name
 // with at least one sfcupnroute row (via the categorization CTE, so
@@ -333,4 +346,53 @@ async function getRoutingDetail(customer, route, category) {
   return result.rows;
 }
 
-module.exports = { getModelOptions, getRoutingSummary, getRoutingDetail };
+// A UPN search is a substring match, so a part number's own `%`/`_`/`\`
+// characters have to be neutralized or they'd act as LIKE wildcards.
+// Postgres LIKE takes backslash as its escape character by default.
+function escapeLikeWildcards(value) {
+  return value.replace(/[\\%_]/g, ch => '\\' + ch);
+}
+
+const UPN_SEARCH_MIN_LENGTH = 2;
+const UPN_SEARCH_LIMIT = 200;
+
+// Routing rows for a part number — the second way into this page, alongside
+// the Customer pivot. Matches any UPN *containing* the search text, so a
+// partial part number still finds its routes, and reports whether the result
+// set was capped so the UI can say so rather than quietly showing a slice.
+async function getRoutingByUpn(upn) {
+  const trimmed = (upn || '').trim();
+  if (trimmed.length < UPN_SEARCH_MIN_LENGTH) {
+    return { rows: [], truncated: false, limit: UPN_SEARCH_LIMIT, minLength: UPN_SEARCH_MIN_LENGTH };
+  }
+
+  const result = await sfcsPool.query(
+    ALL_CATEGORIZED_ROUTES_CTE + `
+    select
+      upn,
+      coalesce(cust_name, '') as customer,
+      modelfamily,
+      coalesce(category, 'Uncategorized') as category,
+      description,
+      coalesce(route, 'Unspecified') as route,
+      updatetime
+    from categorized
+    where upn ilike $1
+    -- Exact matches first: typing a full part number shouldn't bury it under
+    -- the longer UPNs that merely contain it.
+    order by (upper(upn) = upper($2)) desc, upn, route
+    limit $3
+    `,
+    [`%${escapeLikeWildcards(trimmed)}%`, trimmed, UPN_SEARCH_LIMIT + 1]
+  );
+
+  const truncated = result.rows.length > UPN_SEARCH_LIMIT;
+  return {
+    rows: truncated ? result.rows.slice(0, UPN_SEARCH_LIMIT) : result.rows,
+    truncated,
+    limit: UPN_SEARCH_LIMIT,
+    minLength: UPN_SEARCH_MIN_LENGTH,
+  };
+}
+
+module.exports = { getModelOptions, getRoutingSummary, getRoutingDetail, getRoutingByUpn };
