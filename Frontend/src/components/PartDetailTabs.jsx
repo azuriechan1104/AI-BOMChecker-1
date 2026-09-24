@@ -4,14 +4,14 @@ import RawTable from './RawTable'
 import CrdTable from './CrdTable'
 
 const DETAIL_TABS = [
-  { id: 'location', label: 'Location' },
-  { id: 'crd',      label: 'CRD Cfg' },
+  { id: 'location', label: 'Data' },
+  { id: 'crd',      label: 'CRD Spec' },
   { id: 'fru',      label: 'FRU Spec' },
   { id: 'rackSku',  label: 'Rack SKU' },
 ]
 
 // Renders a /api/part-detail response as TPG's own Test BOM tab layout
-// (Location / CRD Cfg / FRU Spec / Rack SKU) — shared by MoLookupPage's
+// (Data / CRD Spec / FRU Spec / Rack SKU) — shared by MoLookupPage's
 // embedded preview and the standalone TPG Check page.
 export default function PartDetailTabs({ partDetail }) {
   const [activeTab, setActiveTab] = useState('location')

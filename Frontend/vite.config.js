@@ -5,7 +5,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      '/api': 'http://localhost:3000'
+      // Backend runs on 3100 locally (see BackEnd/ecosystem.config.js) — 3000
+      // is taken by the wiwynn-rack-monitor frontend dev server.
+      '/api': 'http://localhost:3100'
     }
   }
 })

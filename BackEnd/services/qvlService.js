@@ -22,4 +22,27 @@ async function fetchQvlList(modelRef, location) {
   return qvlResult.recordset;
 }
 
-module.exports = { fetchAllModels, fetchQvlList };
+// Read-only: SP_LocationTable_Query(@ModelRef) → the live per-model Location
+// list TPG's own QVL/Test BOM tabs use to populate their Location dropdown —
+// confirmed live 2026-09-16 against C41A8_L10 (90 rows: ASSETTAG, BIOS #0,
+// BIOS #0.PFM, BMC #0, ..., VR), exactly matching the real exe. Location
+// here is a per-component code (BIOS #0, DIMM_A, CRD, ...), not "L10"/"L11"
+// — those are themselves just two of the many valid Location values for a
+// model, not a separate categorical axis. Supersedes the stale, 9-model
+// MonicaTPGenerator.xml fixture (@BOM-Based-APP/New MTPG/MonicaTPGenerator.xml)
+// for this purpose — that file predates C41A8/C2195/etc. entirely.
+async function fetchLocationTable(modelRef) {
+  const result = await query(
+    'EXEC BOM.dbo.SP_LocationTable_Query @ModelRef = @modelRef',
+    [{ name: 'modelRef', type: sql.NVarChar, value: modelRef }]
+  );
+  return result.recordset.map(r => ({
+    locationName: r.LocationName,
+    type: r.Type,
+    remark: r.Remark,
+    isRootDev: r.IsRootDev,
+    isTreeMode: r.IsTreeMode,
+  }));
+}
+
+module.exports = { fetchAllModels, fetchQvlList, fetchLocationTable };

@@ -1,0 +1,47 @@
+{
+    "macros": [
+        {
+            "name": "ipaddr",
+            "action": "created",
+            "author": "Guest",
+            "date": "2026-09-23 15:48:26",
+            "lines": []
+        },
+        {
+            "name": "ipaddr",
+            "action": "modified",
+            "author": "Guest",
+            "date": "2026-09-23 15:48:30",
+            "lines": [
+                "ip addr"
+            ]
+        }
+    ],
+    "ip_configurations": [],
+    "login_events": [
+        {
+            "host": "10.251.230.225",
+            "user": "fae",
+            "success": true,
+            "mode": "debugpod",
+            "date": "2026-09-23 15:48:07"
+        }
+    ],
+    "vault_feeds": [],
+    "nexa_login_events": [],
+    "feature_block_events": [],
+    "macro_runs": [
+        {
+            "name": "ipaddr",
+            "author": "Unknown",
+            "status": "completed",
+            "total_lines": 1,
+            "ok": 1,
+            "failed": 0,
+            "skipped": 0,
+            "date": "2026-09-23 15:48:36",
+            "host": "10.251.230.225",
+            "duration_sec": 2.2
+        }
+    ]
+}

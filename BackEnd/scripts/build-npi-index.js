@@ -1,24 +1,24 @@
-// Standalone indexer for the NPI Library feature — run manually with
-// `node BackEnd/scripts/build-npi-index.js` whenever NPI Files/MSF changes.
+// Indexer for the NPI Library feature. CLI entry point: `node
+// BackEnd/scripts/build-npi-index.js` — run manually whenever NPI Files/MSF
+// changes. Also exported as buildIndex() so npiLibraryService can trigger a
+// rebuild in-process right after a replace-file upload (see replaceSkuFile /
+// replaceCrossTableFile) — that's the only automatic trigger; a plain
+// filesystem edit outside the upload feature still needs a manual CLI run,
+// same "external, on-demand build step" pattern as HQ Fetching/wts_dashboard/wts_fetch.py.
 // Walks <NPI_DATA_DIR>/MSF/Gen {8,9,10,11}/{Cross table|Documents} and writes
 // MSF/NpiLibrary/index.json, which BackEnd/services/npiLibraryService.js and
-// the NPI Library page read at request time. Never triggered automatically —
-// same "external, on-demand build step" pattern as HQ Fetching/wts_dashboard/wts_fetch.py.
+// the NPI Library page read at request time.
 
 const fs = require('fs');
 const path = require('path');
 const XLSX = require('xlsx');
+const crossTableService = require('../services/crossTableService');
 
 require('dotenv').config({ path: path.join(__dirname, '..', '..', 'config', 'credentials', 'npi.env') });
 
-const NPI_DATA_DIR = (process.env.NPI_DATA_DIR || '').trim();
-if (!NPI_DATA_DIR) {
-  console.error('NPI_DATA_DIR is not set (config/credentials/npi.env). Copy npi.env.example and fill it in.');
-  process.exit(1);
-}
-const MSF_ROOT = path.join(NPI_DATA_DIR, 'MSF');
-const INDEX_DIR = path.join(MSF_ROOT, 'NpiLibrary');
-const INDEX_PATH = path.join(INDEX_DIR, 'index.json');
+// Set fresh at the start of each buildIndex() call (not just once at require
+// time) so a changed NPI_DATA_DIR is picked up without restarting the server.
+let MSF_ROOT, INDEX_DIR, INDEX_PATH;
 
 const BUILD_PHASES = ['DPLY', 'PILOT', 'GROWTH', 'EOP', 'MP'];
 // Prefer a fully-descriptive master filename over a terse alias (e.g.
@@ -26,7 +26,7 @@ const BUILD_PHASES = ['DPLY', 'PILOT', 'GROWTH', 'EOP', 'MP'];
 // itemNumber+revision shows up under two different filenames.
 const DESCRIPTIVE_NAME_RE = /^M\d{7}-\d{3}_.+_Rev[A-Za-z0-9]+/i;
 
-const warnings = [];
+let warnings = [];
 function warn(msg) {
   warnings.push(msg);
   console.warn('WARN:', msg);
@@ -244,14 +244,37 @@ function indexGen({ abs: genAbs, genNumber }) {
       try {
         const sheetNames = getSheetNamesCheap(absPath);
         const stat = fs.statSync(absPath);
-        crossTables.push({
+        const entry = {
           gen: genNumber,
           fileName: f.name,
           relPath: relPath(absPath),
           sheetNames,
           sizeBytes: stat.size,
           modifiedAt: stat.mtime.toISOString(),
-        });
+        };
+        crossTables.push(entry);
+
+        // Row-content parsing is scoped to exactly the one case that's been
+        // hand-verified against a real file (see crossTableService.js) —
+        // every other Gen's Cross Table layout is unverified and not
+        // standardized, so this deliberately does not attempt them.
+        if (genNumber === 11 && /C41A8/i.test(f.name)) {
+          try {
+            const wb = XLSX.readFile(absPath); // full read — cell data needed, not just sheet names
+            const mpSheetNames = sheetNames.filter(n => /^MP L1[01]$/i.test(n));
+            if (mpSheetNames.length) {
+              entry.mpSheets = {};
+              for (const sheetName of mpSheetNames) {
+                entry.mpSheets[sheetName] = crossTableService.parseMpSheet(wb.Sheets[sheetName], sheetName);
+              }
+            }
+            if (sheetNames.includes('BOM review list')) {
+              entry.bomReviewList = crossTableService.parseBomReviewList(wb.Sheets['BOM review list']);
+            }
+          } catch (e) {
+            warn(`${relPath(absPath)}: failed to parse MP sheets/BOM review list (${e.message}) — cross table entry kept metadata-only.`);
+          }
+        }
       } catch (e) {
         warn(`${relPath(absPath)}: failed to open cross table (${e.message}), skipped.`);
       }
@@ -263,15 +286,25 @@ function indexGen({ abs: genAbs, genNumber }) {
   return { skus: [...skusByKey.values()], crossTables };
 }
 
-function main() {
+// Throws instead of process.exit()ing so a caller running this in-process
+// (npiLibraryService, after a replace-file upload) can catch and report a
+// config problem instead of taking the whole server down with it.
+function buildIndex() {
+  const NPI_DATA_DIR = (process.env.NPI_DATA_DIR || '').trim();
+  if (!NPI_DATA_DIR) {
+    throw new Error('NPI_DATA_DIR is not set (config/credentials/npi.env). Copy npi.env.example and fill it in.');
+  }
+  MSF_ROOT = path.join(NPI_DATA_DIR, 'MSF');
+  INDEX_DIR = path.join(MSF_ROOT, 'NpiLibrary');
+  INDEX_PATH = path.join(INDEX_DIR, 'index.json');
+  warnings = [];
+
   if (!fs.existsSync(MSF_ROOT)) {
-    console.error(`MSF folder not found at ${MSF_ROOT} — check NPI_DATA_DIR.`);
-    process.exit(1);
+    throw new Error(`MSF folder not found at ${MSF_ROOT} — check NPI_DATA_DIR.`);
   }
   const genDirs = getGenDirs();
   if (genDirs.length === 0) {
-    console.error(`No Gen 8/9/10/11 folders found under ${MSF_ROOT}.`);
-    process.exit(1);
+    throw new Error(`No Gen 8/9/10/11 folders found under ${MSF_ROOT}.`);
   }
 
   let allSkus = [];
@@ -283,9 +316,10 @@ function main() {
     allCrossTables = allCrossTables.concat(crossTables);
   }
 
+  const generatedAt = new Date().toISOString();
   fs.mkdirSync(INDEX_DIR, { recursive: true });
   fs.writeFileSync(INDEX_PATH, JSON.stringify({
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     warnings,
     skus: allSkus,
     crossTables: allCrossTables,
@@ -293,6 +327,17 @@ function main() {
 
   console.log(`\nWrote ${allSkus.length} SKU(s) and ${allCrossTables.length} cross table file(s) to ${INDEX_PATH}`);
   if (warnings.length) console.log(`${warnings.length} warning(s) — see above.`);
+
+  return { generatedAt, skuCount: allSkus.length, crossTableCount: allCrossTables.length, warnings, indexPath: INDEX_PATH };
 }
 
-main();
+if (require.main === module) {
+  try {
+    buildIndex();
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
+}
+
+module.exports = { buildIndex };

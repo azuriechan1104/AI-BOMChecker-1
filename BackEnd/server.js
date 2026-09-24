@@ -1,13 +1,16 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const multer = require('multer');
 const { sql, query, annonPool, annonWritePool } = require('./DB');
 const { fetchMoItem, parseMoItems } = require('./services/moApiClient');
 const wtsService = require('./services/wtsService');
 const npiLibraryService = require('./services/npiLibraryService');
-const { fetchAllModels, fetchQvlList } = require('./services/qvlService');
+const { fetchAllModels, fetchQvlList, fetchLocationTable } = require('./services/qvlService');
 const { findCrdRefRow, buildPartDetail } = require('./services/partDetailService');
 const goldenTemplateService = require('./services/goldenTemplateService');
+const pnCheckService = require('./services/pnCheckService');
+const plmStagingService = require('./services/plmStagingService');
 const { fetchReviewHistory } = require('./services/tpaHistoryService');
 const cycleTimeService = require('./services/cycleTimeService');
 const firstPassYieldService = require('./services/firstPassYieldService');
@@ -738,13 +741,18 @@ function currentIsoWeekMonday() {
   return d.toISOString().slice(0, 10);
 }
 
-// ── API: CRD Tracker — record this week's CRD revision for an existing line ─
+// ── API: CRD Tracker — record this week's CRD revision for a CRD # ─────────
+// One update targets a CRD number, not a single line: every tracking.crdbom_line
+// that carries the given crd_number (L11 and L10 alike) gets this week's
+// revision upserted into crdbom_week_status in a single batched statement, and
+// any in-memory Test line sharing that CRD # has its own local history updated
+// too. iso_year/work_week come from getCurrentIsoWeek() so "this week" means the
+// same thing across the whole feature.
 app.post('/api/crd-tracker/ww-rev-update', async (req, res) => {
-  const { lineId, crdCode } = req.body;
-  if (!Number.isInteger(lineId) || lineId === 0) {
-    return res.status(400).json({ error: 'lineId must resolve to an existing line.' });
-  }
+  const { crdNumber, crdCode } = req.body;
+  if (!crdNumber?.trim()) return res.status(400).json({ error: 'crdNumber is required.' });
   if (!crdCode?.trim()) return res.status(400).json({ error: 'crdCode is required.' });
+  const crd = crdNumber.trim();
   const code = crdCode.trim().toUpperCase();
   try {
     const { codes } = await getRevisionCodes();
@@ -754,35 +762,56 @@ app.post('/api/crd-tracker/ww-rev-update', async (req, res) => {
     const { iso_year, work_week } = await getCurrentIsoWeek();
     const weekLabel = `WW${work_week}`;
 
-    // Negative lineId = synthetic id for an in-memory Test line — updates
-    // that row's local history only, never touches Postgres.
-    if (lineId < 0) {
-      const testId = -lineId;
-      const row = crdTestLines.get(testId);
-      if (!row) return res.status(404).json({ error: `Test line ${testId} not found.` });
+    // In-memory Test lines with this CRD # — update their local weekly history
+    // only, never Postgres. Mirrors the single-line Test path this replaced.
+    const testMonday = currentIsoWeekMonday();
+    let testLinesUpdated = 0;
+    for (const row of crdTestLines.values()) {
+      if ((row.crdNumber || '').trim() !== crd) continue;
       row.latestWeekLabel = weekLabel;
       row.latestCrdCode = code;
       row.latestIsoYear = iso_year;
       row.latestWorkWeek = work_week;
-      const entry = { weekLabel, isoYear: iso_year, workWeek: work_week, weekStartDate: currentIsoWeekMonday(), crdCode: code };
+      const entry = { weekLabel, isoYear: iso_year, workWeek: work_week, weekStartDate: testMonday, crdCode: code };
       const existingIdx = row.testHistory.findIndex(h => h.isoYear === iso_year && h.workWeek === work_week);
       if (existingIdx >= 0) row.testHistory[existingIdx] = entry;
       else row.testHistory.push(entry);
-      return res.json({ ok: true, weekStatus: { week_label: weekLabel, crd_code: code } });
+      testLinesUpdated++;
     }
 
+    // Real lines: one batched upsert covering every line with this CRD #.
     const upsert = await annonWritePool.query(
       `INSERT INTO tracking.crdbom_week_status
          (line_id, iso_year, work_week, week_label, week_start_date, crd_code, crd_seq)
-       VALUES ($1, $2, $3, $4, (date_trunc('week', CURRENT_DATE))::date, $5, $6)
+       SELECT id, $2, $3, $4, (date_trunc('week', CURRENT_DATE))::date, $5, $6
+       FROM tracking.crdbom_line
+       WHERE crd_number = $1
        ON CONFLICT (line_id, iso_year, work_week)
        DO UPDATE SET crd_code = EXCLUDED.crd_code, crd_seq = EXCLUDED.crd_seq
-       RETURNING id, week_label, crd_code`,
-      [lineId, iso_year, work_week, weekLabel, code, match.seq]
+       RETURNING line_id`,
+      [crd, iso_year, work_week, weekLabel, code, match.seq]
     );
-    res.json({ ok: true, weekStatus: upsert.rows[0] });
+    const realLinesUpdated = upsert.rowCount;
+
+    if (realLinesUpdated === 0 && testLinesUpdated === 0) {
+      return res.status(404).json({ error: `No tracked lines carry CRD # "${crd}".` });
+    }
+
+    res.json({
+      ok: true,
+      crdNumber: crd,
+      crdCode: code,
+      weekLabel,
+      isoYear: iso_year,
+      workWeek: work_week,
+      linesUpdated: realLinesUpdated + testLinesUpdated,
+      realLinesUpdated,
+      testLinesUpdated,
+    });
   } catch (err) {
-    if (err.code === '23503') return res.status(404).json({ error: `Line ${lineId} not found.` });
+    if (err.code === '23503') {
+      return res.status(400).json({ error: `Revision code "${code}" isn't registered in the database's revision-code table.` });
+    }
     console.error(err);
     res.status(500).json({ error: err.message });
   }
@@ -918,6 +947,88 @@ app.post('/api/golden-template/cpn-detail', async (req, res) => {
   }
   try {
     res.json(await goldenTemplateService.resolveCpnDetail(cpn.trim(), variants));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── API: Create New BOM — "Add To PLM" staging (no live PLM call) ──────────
+//
+// Plan decision #2: staged/simulated only. plmStagingService.js has zero
+// DB/network imports so it cannot write anywhere even by accident — same
+// contract as /api/bomguard-workflow/submit above.
+app.post('/api/new-bom/plm-stage', (req, res) => {
+  const { rows } = req.body || {};
+  if (!Array.isArray(rows) || !rows.length) {
+    return res.status(400).json({ error: 'rows (non-empty array) is required.' });
+  }
+  res.json(plmStagingService.stageRows(rows));
+});
+
+// ── API: Create New BOM — TPG PN Check ──────────────────────────────────────
+//
+// Composes MO / Cross Table (Gen 11 + C41A8 only, see pnCheckService.js) /
+// SKU / previous-CPN checks for one candidate part number, plus the same
+// Test BOM detail (Data/CRD Spec/FRU Spec/Rack SKU) buildPartDetail() gives
+// /api/part-detail, so the review UI can show the evidence, not just pass/
+// fail. Read-only end to end — MO API GET-equivalent, bom.dbo.SysBom +
+// MSFT_SKU.dbo SELECTs, QVL stored procs, and the NPI index file. No write
+// path anywhere in the call graph. moNumber is optional (pnCheckService.
+// checkMo treats a missing one as "skipped," not an error) — only
+// candidatePn is required.
+app.post('/api/new-bom/pn-check', async (req, res) => {
+  const { moNumber, candidatePn, gen, modelToken, l10Mspn, l11Mspn, msfNumber } = req.body || {};
+  if (!candidatePn?.trim()) {
+    return res.status(400).json({ error: 'candidatePn is required.' });
+  }
+  try {
+    res.json(await pnCheckService.runTpgPnCheck({
+      moNumber: moNumber?.trim() || null,
+      candidatePn: candidatePn.trim(),
+      gen,
+      modelToken,
+      l10Mspn,
+      l11Mspn,
+      msfNumber,
+    }));
+  } catch (err) {
+    console.error(err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ── API: Create New BOM — cross-model "check TPG" for one PN ───────────────
+//
+// The QVL stage's standalone PN+Description portion — usable without first
+// picking a Model Reference/Location. See pnCheckService.checkPnAcrossQvl
+// for what this does and does not cover (no PLM check — that capability
+// doesn't exist in this backend).
+app.post('/api/new-bom/qvl-lookup', async (req, res) => {
+  const { partNumber } = req.body || {};
+  if (!partNumber?.trim()) {
+    return res.status(400).json({ error: 'partNumber is required.' });
+  }
+  try {
+    res.json(await pnCheckService.checkPnAcrossQvl(partNumber.trim()));
+  } catch (err) {
+    console.error(err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ── API: live per-model Location list (QVL tab's Location dropdown) ────────
+//
+// Real, live equivalent of the exe's own Location combo for a Model
+// Reference — see qvlService.fetchLocationTable. Confirmed live against
+// C41A8_L10 (90 rows) to exactly match the real dropdown's contents.
+app.post('/api/qvl-locations', async (req, res) => {
+  const { modelRef } = req.body;
+  if (!modelRef?.trim()) {
+    return res.status(400).json({ error: 'modelRef is required.' });
+  }
+  try {
+    res.json({ locations: await fetchLocationTable(modelRef.trim()) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -2348,6 +2459,87 @@ app.get('/api/npi/cross-tables/:gen/:fileName/download', (req, res) => {
   try {
     const absPath = npiLibraryService.resolveCrossTableFile(req.params.gen, req.params.fileName);
     res.download(absPath, path.basename(absPath));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// Memory storage — files are small (single .xlsx) and get written straight
+// through to the existing path on disk, no need to touch a temp file.
+const npiUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+
+// Every other error path on this router responds with JSON, but multer's own
+// parsing errors (e.g. over the size limit) call next(err) and would
+// otherwise fall through to Express's default HTML error page — the same
+// "res.json() chokes on the response body" failure mode as the EADDRINUSE
+// port mismatch, just triggered a different way. Keep it JSON here too.
+function npiUploadSingle(req, res, next) {
+  npiUpload.single('file')(req, res, err => {
+    if (err) return res.status(400).json({ error: err.message });
+    next();
+  });
+}
+
+// Replace-in-place only: overwrites the file an already-indexed SKU/Cross
+// Table points to, then kicks off a background reindex (see
+// rebuildIndexInBackground in npiLibraryService.js — a full reindex takes
+// minutes, so it runs as a separate OS process instead of blocking this
+// request/the rest of the app). Does not create new SKUs/order folders — see
+// npiLibraryService.js for the upload validation (sheet shape +
+// itemNumber/revision match) and pre-overwrite backup.
+app.post('/api/npi/skus/:itemNumber/:revision/upload', npiUploadSingle, (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded (form field "file").' });
+    const result = npiLibraryService.replaceSkuFile(req.params.itemNumber, req.params.revision, req.file.buffer, req.file.originalname);
+    res.json({ ok: true, reindexing: result.reindexing });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/npi/cross-tables/:gen/:fileName/upload', npiUploadSingle, (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded (form field "file").' });
+    const result = npiLibraryService.replaceCrossTableFile(req.params.gen, req.params.fileName, req.file.buffer, req.file.originalname);
+    res.json({ ok: true, reindexing: result.reindexing });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ── API: NPI Library — raw folder browser ───────────────────────────────────
+// Independent of index.json: walks MSF_ROOT live, so it works for any file
+// (not just indexed SKU/Cross Table masters) and for folders the indexer
+// doesn't know about (General spec, Issue list & PFMEA, order folders'
+// ancillary files, ...). ?path= is a slash-joined relPath from MSF_ROOT,
+// '' meaning MSF_ROOT itself — see npiLibraryService.js for the
+// containment/reserved-folder checks.
+app.get('/api/npi/browse', (req, res) => {
+  try {
+    res.json(npiLibraryService.listFolder(String(req.query.path || '')));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.get('/api/npi/browse/download', (req, res) => {
+  try {
+    const absPath = npiLibraryService.resolveBrowseFile(String(req.query.path || ''));
+    res.download(absPath, path.basename(absPath));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// Uploads into an existing folder, creating a new file (unlike the
+// replace-in-place routes above). 409 on a name collision unless
+// ?overwrite=true — the frontend prompts before retrying with that set.
+app.post('/api/npi/browse/upload', npiUploadSingle, (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded (form field "file").' });
+    const overwrite = req.query.overwrite === 'true';
+    const result = npiLibraryService.uploadToFolder(String(req.query.path || ''), req.file.buffer, req.file.originalname, overwrite);
+    res.json(result);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

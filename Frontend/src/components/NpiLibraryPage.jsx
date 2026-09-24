@@ -247,7 +247,7 @@ function RecentlyUpdatedSidebar({ skus, crossTables, onJump }) {
 // Tab 2 — pick an indexed SKU BOM master or Cross Table file and browse its
 // sheets in-browser. Mirrors MsftProjectsPage's SpreadsheetViewer, but the
 // option list spans two file families dispatched to different endpoints.
-function SpreadsheetViewer({ skus, crossTables, preselect, onConsumePreselect }) {
+function SpreadsheetViewer({ skus, crossTables, preselect, onConsumePreselect, onReplaced }) {
   const options = useMemo(() => ([
     ...skus.map(s => ({
       value: `sku:${s.itemNumber}:${s.revision}`,
@@ -267,6 +267,9 @@ function SpreadsheetViewer({ skus, crossTables, preselect, onConsumePreselect })
   const [rowsLoading, setRowsLoading]   = useState(false)
   const [viewerError, setViewerError]   = useState(null)
   const [rowSearch, setRowSearch]       = useState('')
+  const [uploading, setUploading]       = useState(false)
+  const [uploadMsg, setUploadMsg]       = useState(null)
+  const [reloadNonce, setReloadNonce]   = useState(0)
 
   useEffect(() => {
     if (preselect) {
@@ -289,6 +292,36 @@ function SpreadsheetViewer({ skus, crossTables, preselect, onConsumePreselect })
     return `/api/npi/cross-tables/${encodeURIComponent(gen)}/${encodeURIComponent(fileParts.join(':'))}`
   }
 
+  // Replace-in-place: uploads a new .xlsx over whatever selectedKey currently
+  // points to. The backend re-validates (sheet shape, and for a SKU the
+  // Item Number/Revision inside the file) before it overwrites anything, so
+  // "wrong file" mistakes come back as an error here rather than silently
+  // corrupting the library. The sheet/row refetch below shows the new file's
+  // contents right away (a plain file read), but the full reindex the
+  // backend kicks off (Modified date, File Size, sidebar) runs in the
+  // background and can take a few minutes — onReplaced() may still show
+  // pre-upload metadata until that finishes.
+  function handleUploadFile(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file || !selectedKey) return
+    setUploading(true)
+    setUploadMsg(null)
+    setViewerError(null)
+    const body = new FormData()
+    body.append('file', file)
+    fetch(`${endpointBase(selectedKey)}/upload`, { method: 'POST', body })
+      .then(async res => {
+        const json = await res.json()
+        if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+        setUploadMsg('File replaced. Re-indexing in the background — Modified/File Size elsewhere on this page can take a few minutes to catch up.')
+        onReplaced?.()
+        setReloadNonce(n => n + 1) // re-pull sheets/rows even if selectedKey/selectedSheet didn't change
+      })
+      .catch(e => setUploadMsg(`Upload failed: ${e.message}`))
+      .finally(() => setUploading(false))
+  }
+
   useEffect(() => {
     if (!selectedKey) { setSheetNames([]); setSelectedSheet(null); setSheetData(null); return }
     setViewerError(null)
@@ -304,7 +337,7 @@ function SpreadsheetViewer({ skus, crossTables, preselect, onConsumePreselect })
       .catch(e => setViewerError(e.message))
       .finally(() => setSheetsLoading(false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedKey])
+  }, [selectedKey, reloadNonce])
 
   useEffect(() => {
     if (!selectedKey || !selectedSheet) return
@@ -319,7 +352,7 @@ function SpreadsheetViewer({ skus, crossTables, preselect, onConsumePreselect })
       .catch(e => setViewerError(e.message))
       .finally(() => setRowsLoading(false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedKey, selectedSheet])
+  }, [selectedKey, selectedSheet, reloadNonce])
 
   const displayedRows = useMemo(() => {
     if (!sheetData) return []
@@ -336,7 +369,7 @@ function SpreadsheetViewer({ skus, crossTables, preselect, onConsumePreselect })
         <SearchableSelect
           options={options}
           value={selectedKey}
-          onChange={val => { setSelectedKey(val); setRowSearch('') }}
+          onChange={val => { setSelectedKey(val); setRowSearch(''); setUploadMsg(null) }}
           placeholder="Search & choose a SKU BOM or Cross Table…"
         />
         {sheetNames.length > 1 && (
@@ -358,7 +391,25 @@ function SpreadsheetViewer({ skus, crossTables, preselect, onConsumePreselect })
             Download original file
           </a>
         )}
+        {selectedKey && (
+          <label className="filter-btn" style={{ cursor: uploading ? 'default' : 'pointer', opacity: uploading ? 0.6 : 1 }}>
+            {uploading ? 'Uploading…' : 'Replace file…'}
+            <input
+              type="file"
+              accept=".xlsx"
+              onChange={handleUploadFile}
+              disabled={uploading}
+              style={{ display: 'none' }}
+            />
+          </label>
+        )}
       </div>
+
+      {uploadMsg && (
+        <p className="filter-hint" style={{ marginBottom: '.5rem', color: uploadMsg.startsWith('Upload failed') ? 'var(--fail-fg)' : 'var(--info-fg)' }}>
+          {uploadMsg}
+        </p>
+      )}
 
       {!selectedKey && (
         <div className="state-box" style={{ padding: '1.5rem' }}>
@@ -395,6 +446,138 @@ function SpreadsheetViewer({ skus, crossTables, preselect, onConsumePreselect })
   )
 }
 
+// Tab 3 — a plain file-manager view of MSF_ROOT: walks the real filesystem
+// live (via /api/npi/browse), not index.json, so it reaches folders/files
+// the indexer never touches (General spec, Issue list & PFMEA, ancillary
+// files inside an order folder, ...) and works even with no index built yet.
+// Upload targets whatever folder is currently open.
+function FileBrowser() {
+  const [currentPath, setCurrentPath] = useState('')
+  const [entries, setEntries]         = useState([])
+  const [loading, setLoading]         = useState(true)
+  const [error, setError]             = useState(null)
+  const [uploading, setUploading]     = useState(false)
+  const [uploadMsg, setUploadMsg]     = useState(null)
+  const [conflict, setConflict]       = useState(null) // the File object once a 409 comes back
+
+  function load(p) {
+    setLoading(true)
+    setError(null)
+    fetch(`/api/npi/browse?path=${encodeURIComponent(p)}`)
+      .then(async res => {
+        const json = await res.json()
+        if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+        setEntries(json.entries)
+      })
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => { load(currentPath) }, [currentPath])
+
+  function goTo(p) {
+    setCurrentPath(p)
+    setUploadMsg(null)
+    setConflict(null)
+  }
+
+  function doUpload(file, overwrite) {
+    setUploading(true)
+    setUploadMsg(null)
+    const body = new FormData()
+    body.append('file', file)
+    const qs = `path=${encodeURIComponent(currentPath)}${overwrite ? '&overwrite=true' : ''}`
+    fetch(`/api/npi/browse/upload?${qs}`, { method: 'POST', body })
+      .then(async res => {
+        if (res.status === 409) { setConflict(file); return }
+        const json = await res.json()
+        if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+        setUploadMsg(`Uploaded "${json.name}".${json.reindexing ? ' Index is rebuilding in the background — Library tab will catch up in a few minutes.' : ''}`)
+        load(currentPath)
+      })
+      .catch(e => setUploadMsg(`Upload failed: ${e.message}`))
+      .finally(() => setUploading(false))
+  }
+
+  function handleFileInput(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setConflict(null)
+    doUpload(file, false)
+  }
+
+  const crumbs = currentPath ? currentPath.split('/') : []
+
+  return (
+    <>
+      <div className="npi-breadcrumb">
+        <button type="button" className="npi-crumb" onClick={() => goTo('')}>NPI Files</button>
+        {crumbs.map((seg, i) => (
+          <Fragment key={i}>
+            <span className="npi-crumb-sep">›</span>
+            <button type="button" className="npi-crumb" onClick={() => goTo(crumbs.slice(0, i + 1).join('/'))}>{seg}</button>
+          </Fragment>
+        ))}
+      </div>
+
+      <div className="comparison-toolbar" style={{ marginBottom: '.75rem' }}>
+        <label className="filter-btn" style={{ cursor: uploading ? 'default' : 'pointer', opacity: uploading ? 0.6 : 1 }}>
+          {uploading ? 'Uploading…' : 'Upload here…'}
+          <input type="file" onChange={handleFileInput} disabled={uploading} style={{ display: 'none' }} />
+        </label>
+      </div>
+
+      {uploadMsg && (
+        <p className="filter-hint" style={{ marginBottom: '.5rem', color: uploadMsg.startsWith('Upload failed') ? 'var(--fail-fg)' : 'var(--info-fg)' }}>
+          {uploadMsg}
+        </p>
+      )}
+
+      {conflict && (
+        <div className="state-box" style={{ padding: '1rem', marginBottom: '.75rem' }}>
+          <p>"{conflict.name}" already exists in this folder.</p>
+          <div className="filter-btns">
+            <button type="button" className="filter-btn" onClick={() => { const f = conflict; setConflict(null); doUpload(f, true) }}>Replace it</button>
+            <button type="button" className="filter-btn" onClick={() => setConflict(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {loading && <StateBox type="loading" title="Loading folder…" />}
+      {!loading && error && <StateBox type="error" message={error} />}
+      {!loading && !error && (
+        <div className="table-wrap">
+          <table className="npi-browser-table">
+            <thead><tr><th>Name</th><th>Modified</th><th>File Size</th></tr></thead>
+            <tbody>
+              {entries.length === 0 && (
+                <tr><td colSpan={3} style={{ textAlign: 'center', padding: '1.5rem' }}>Empty folder.</td></tr>
+              )}
+              {entries.map(e => {
+                const entryPath = currentPath ? `${currentPath}/${e.name}` : e.name
+                return (
+                  <tr
+                    key={e.name}
+                    className="npi-browser-row"
+                    onClick={() => e.type === 'dir'
+                      ? goTo(entryPath)
+                      : window.open(`/api/npi/browse/download?path=${encodeURIComponent(entryPath)}`, '_blank')}
+                  >
+                    <td>{e.type === 'dir' ? '📁 ' : '📄 '}{e.name}</td>
+                    <td>{formatDate(e.modifiedAt)}</td>
+                    <td>{e.type === 'dir' ? '—' : formatBytes(e.sizeBytes)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  )
+}
+
 export default function NpiLibraryPage() {
   const [skus, setSkus]                     = useState([])
   const [crossTables, setCrossTables]       = useState([])
@@ -412,8 +595,11 @@ export default function NpiLibraryPage() {
   const [expandedKey, setExpandedKey]       = useState(null)
   const [viewerPreselect, setViewerPreselect] = useState(null)
 
-  useEffect(() => {
-    fetch('/api/npi/index')
+  // Also called after a Spreadsheet Viewer "Replace file…" upload, so the
+  // Library tab's Modified/File Size columns and Recently Updated sidebar
+  // pick up the new file without a page reload.
+  function refreshIndex() {
+    return fetch('/api/npi/index')
       .then(async res => {
         const json = await res.json()
         if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
@@ -424,7 +610,10 @@ export default function NpiLibraryPage() {
         setCrossTables(json.crossTables || [])
       })
       .catch(e => setError('Network error: ' + e.message))
-      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    refreshIndex().finally(() => setLoading(false))
   }, [])
 
   const genCounts = useMemo(() => {
@@ -518,10 +707,20 @@ export default function NpiLibraryPage() {
   const tabs = [
     { id: 'library', label: 'Library', count: skus.length },
     { id: 'sheets', label: 'Spreadsheet Viewer' },
+    { id: 'browse', label: 'File Browser' },
   ]
 
-  const noDataYet = !loading && !error && (!dataDirConfigured || !indexExists)
-  const showSidebar = !loading && !error && !noDataYet && skus.length > 0 && activeTab === 'library'
+  // Library/Spreadsheet Viewer need index.json (dataDirConfigured, indexExists,
+  // skus.length); File Browser walks the real filesystem directly and works
+  // without any of that, so it's not behind this gate.
+  const noIndexReason = !dataDirConfigured
+    ? { title: 'NPI_DATA_DIR isn\'t configured', message: 'Set NPI_DATA_DIR in config/credentials/npi.env (copy npi.env.example), then reload this page.' }
+    : !indexExists
+      ? { title: 'No index yet', message: 'Run node BackEnd/scripts/build-npi-index.js to build the NPI Library index, then reload this page (or upload a file via the File Browser tab first).' }
+      : skus.length === 0
+        ? { title: 'No SKUs found', message: 'The NPI index has no SKU BOM masters yet.' }
+        : null
+  const showSidebar = !loading && !error && !noIndexReason && activeTab === 'library'
 
   return (
     <div className="app-body">
@@ -531,30 +730,12 @@ export default function NpiLibraryPage() {
         )}
         {!loading && error && <StateBox type="error" message={error} />}
 
-        {!loading && !error && !dataDirConfigured && (
-          <StateBox
-            type="empty"
-            title="NPI_DATA_DIR isn't configured"
-            message="Set NPI_DATA_DIR in config/credentials/npi.env (copy npi.env.example), then reload this page."
-          />
-        )}
-        {!loading && !error && dataDirConfigured && !indexExists && (
-          <StateBox
-            type="empty"
-            title="No index yet"
-            message="Run node BackEnd/scripts/build-npi-index.js to build the NPI Library index, then reload this page."
-          />
-        )}
-        {!loading && !error && !noDataYet && skus.length === 0 && (
-          <StateBox type="empty" title="No SKUs found" message="The NPI index has no SKU BOM masters yet." />
-        )}
-
-        {!loading && !error && !noDataYet && skus.length > 0 && (
+        {!loading && !error && (
           <>
             <TabBar tabs={tabs} activeTab={activeTab} onSwitch={setActiveTab} />
 
             {activeTab === 'library' && (
-              <>
+              noIndexReason ? <StateBox type="empty" title={noIndexReason.title} message={noIndexReason.message} /> : <>
                 <section className="dashboard-section">
                   <div className="section-title">Dashboard</div>
                   <p className="filter-hint" style={{ marginBottom: '.5rem' }}>
@@ -610,13 +791,18 @@ export default function NpiLibraryPage() {
             )}
 
             {activeTab === 'sheets' && (
-              <SpreadsheetViewer
-                skus={skus}
-                crossTables={crossTables}
-                preselect={viewerPreselect}
-                onConsumePreselect={() => setViewerPreselect(null)}
-              />
+              noIndexReason
+                ? <StateBox type="empty" title={noIndexReason.title} message={noIndexReason.message} />
+                : <SpreadsheetViewer
+                    skus={skus}
+                    crossTables={crossTables}
+                    preselect={viewerPreselect}
+                    onConsumePreselect={() => setViewerPreselect(null)}
+                    onReplaced={refreshIndex}
+                  />
             )}
+
+            {activeTab === 'browse' && <FileBrowser />}
           </>
         )}
       </main>

@@ -241,73 +241,42 @@ function NewSkuForm({ mode, rows, revisionCodes, onSaved, onClose }) {
 
 // ── WW Rev Update form ──────────────────────────────────────────────────────
 function WwRevForm({ rows, revisionCodes, currentIsoYear, currentWorkWeek, onSaved, onClose }) {
-  // Includes Test rows (negative synthetic lineId) alongside real lines —
-  // the backend routes a WW Rev Update for a Test line into its own local
-  // history instead of Postgres, so this flow can be fully exercised without
-  // touching the database.
+  // One update targets a CRD # rather than a single line: every L11/L10 line
+  // sharing that CRD # gets this week's revision recorded at once. Test rows
+  // (negative synthetic lineId) are matched the same way — the backend routes
+  // them into their own local history instead of Postgres, so the flow can
+  // still be exercised without touching the database.
   const pickableLines = useMemo(() => uniqByLineId(rows), [rows])
 
-  const [l11Msf, setL11Msf] = useState('')
-  const [l11Sku, setL11Sku] = useState('')
   const [crdNumber, setCrdNumber] = useState('')
   const [crdCode, setCrdCode] = useState('')
   const [status, setStatus] = useState('idle')
   const [error, setError] = useState(null)
+  const [result, setResult] = useState(null)
 
-  // Four cascading dropdowns: each one's options are narrowed by whatever's
-  // already picked before it, so by the time all three identifying fields
-  // are chosen they resolve to exactly one line rather than an
-  // arbitrary/mismatched MSF+SKU+CRD combination.
-  const l11MsfOptions = useMemo(() =>
-    uniqSorted(pickableLines.map(l => l.l11Msf)).map(v => ({ value: v, label: v }))
+  const crdOptions = useMemo(() =>
+    uniqSorted(pickableLines.map(l => l.crdNumber)).map(v => ({ value: v, label: v }))
   , [pickableLines])
 
-  const l11SkuCandidates = useMemo(() =>
-    pickableLines.filter(l => !l11Msf || l.l11Msf === l11Msf)
-  , [pickableLines, l11Msf])
-  const l11SkuOptions = useMemo(() =>
-    uniqSorted(l11SkuCandidates.map(l => l.l11Sku)).map(v => ({ value: v, label: v }))
-  , [l11SkuCandidates])
+  const revisionOptions = useMemo(() =>
+    revisionCodes.map(c => ({ value: c.code, label: c.code }))
+  , [revisionCodes])
 
-  const crdCandidates = useMemo(() =>
-    l11SkuCandidates.filter(l => !l11Sku || l.l11Sku === l11Sku)
-  , [l11SkuCandidates, l11Sku])
-  const crdOptions = useMemo(() =>
-    uniqSorted(crdCandidates.map(l => l.crdNumber)).map(v => ({ value: v, label: v }))
-  , [crdCandidates])
-
-  const resolvedCandidates = useMemo(() =>
-    crdCandidates.filter(l => !crdNumber || l.crdNumber === crdNumber)
-  , [crdCandidates, crdNumber])
-  const resolvedLine = (l11Msf && l11Sku && crdNumber && resolvedCandidates.length === 1)
-    ? resolvedCandidates[0] : null
-
-  const revisionOptions = useMemo(() => revisionCodes.map(c => ({ value: c.code, label: c.code })), [revisionCodes])
-
-  function handleL11MsfChange(v) {
-    setL11Msf(v)
-    setL11Sku('')
-    setCrdNumber('')
-  }
-  function handleL11SkuChange(v) {
-    setL11Sku(v)
-    setCrdNumber('')
-  }
+  // Every tracked line (L11 and L10, real or Test) carrying the chosen CRD # —
+  // the update writes this week's revision to all of them.
+  const affectedLines = useMemo(() =>
+    crdNumber ? pickableLines.filter(l => l.crdNumber === crdNumber) : []
+  , [pickableLines, crdNumber])
 
   async function handleSubmit(e) {
     e.preventDefault()
-    if (!resolvedLine) {
-      setStatus('error')
-      setError(resolvedCandidates.length > 1
-        ? 'That combination matches more than one line — pick a more specific CRD #.'
-        : 'Select L11 MSF, L11 SKU, and CRD # to identify an existing line.')
-      return
-    }
-    if (!crdCode) { setStatus('error'); setError('Select a revision code.'); return }
+    if (!crdNumber) { setStatus('error'); setError('Select a CRD # to update.'); return }
+    if (!crdCode)   { setStatus('error'); setError('Select a revision code.'); return }
     setStatus('submitting')
     setError(null)
     try {
-      await postJson('/api/crd-tracker/ww-rev-update', { lineId: resolvedLine.lineId, crdCode })
+      const res = await postJson('/api/crd-tracker/ww-rev-update', { crdNumber, crdCode })
+      setResult(res)
       setStatus('success')
     } catch (err) {
       setStatus('error')
@@ -316,11 +285,15 @@ function WwRevForm({ rows, revisionCodes, currentIsoYear, currentWorkWeek, onSav
   }
 
   if (status === 'submitting' || status === 'success') {
+    const count = result?.linesUpdated ?? affectedLines.length
+    const testNote = result?.testLinesUpdated
+      ? ` (${result.testLinesUpdated} test row${result.testLinesUpdated === 1 ? '' : 's'} saved locally only)`
+      : ''
     return (
       <StatusBlock
         status={status}
         error={error}
-        successText={`Recorded ${crdCode} for WW${currentWorkWeek} · ${currentIsoYear} on Line No ${resolvedLine?.no}${resolvedLine?.isTest ? ' (test row — saved locally only)' : ''}.`}
+        successText={`Recorded ${crdCode} for WW${currentWorkWeek} · ${currentIsoYear} on ${count} line${count === 1 ? '' : 's'} sharing CRD # ${crdNumber}${testNote}.`}
         onDone={() => { onSaved(); onClose() }}
       />
     )
@@ -340,26 +313,24 @@ function WwRevForm({ rows, revisionCodes, currentIsoYear, currentWorkWeek, onSav
       )}
       <div className="modal-fields">
         <div className="modal-form-field">
-          <label>L11 MSF *</label>
-          <SearchableSelect options={l11MsfOptions} value={l11Msf} onChange={handleL11MsfChange} placeholder="Select L11 MSF…" />
-        </div>
-        <div className="modal-form-field">
-          <label>L11 SKU *</label>
-          <SearchableSelect options={l11SkuOptions} value={l11Sku} onChange={handleL11SkuChange} placeholder="Select L11 SKU…" disabled={!l11Msf} />
-        </div>
-        <div className="modal-form-field">
           <label>CRD # *</label>
-          <SearchableSelect options={crdOptions} value={crdNumber} onChange={setCrdNumber} placeholder="Select CRD #…" disabled={!l11Sku} />
+          <SearchableSelect options={crdOptions} value={crdNumber} onChange={setCrdNumber} placeholder="Select CRD #…" />
         </div>
         <div className="modal-form-field">
           <label>Revision *</label>
           <SearchableSelect options={revisionOptions} value={crdCode} onChange={setCrdCode} placeholder="Select revision…" />
         </div>
       </div>
-      {resolvedLine && (
+      {crdNumber && (
         <p className="hint" style={{ marginTop: '.75rem' }}>
-          Resolves to Line No {resolvedLine.no}
-          {resolvedLine.isTest && <span className="badge-grey" style={{ marginLeft: '.4rem' }}>TEST</span>}
+          {affectedLines.length === 0
+            ? 'No tracked lines currently carry this CRD #.'
+            : (
+              <>
+                Updates {affectedLines.length} line{affectedLines.length === 1 ? '' : 's'} — No {affectedLines.map(l => l.no).join(', ')}
+                {affectedLines.some(l => l.isTest) && <span className="badge-grey" style={{ marginLeft: '.4rem' }}>incl. TEST</span>}
+              </>
+            )}
         </p>
       )}
       <button type="submit" className="search-btn" style={{ marginTop: '1.25rem' }}>Update</button>

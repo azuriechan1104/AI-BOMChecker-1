@@ -7,6 +7,7 @@ import ResultsArea from './components/ResultsArea'
 import AnomalySidebar from './components/AnomalySidebar'
 import RowDetailModal from './components/RowDetailModal'
 import MoLookupPage from './components/MoLookupPage'
+import CreateNewBomPage from './components/CreateNewBomPage'
 import TpgCheckPage from './components/TpgCheckPage'
 import TpaHistoryPage from './components/TpaHistoryPage'
 import CycleTimePage from './components/CycleTimePage'
@@ -27,6 +28,7 @@ const PAGES = [
       { id: 'tpg-check',       label: 'TPG Check' },
       { id: 'tpa-history',     label: 'TPA History' },
       { id: 'mo',              label: 'Create BOM' },
+      { id: 'create-new-bom',  label: 'Create New BOM' },
       { id: 'golden-template', label: 'Golden Template' },
       { id: 'cycle-time',      label: 'Cycle Time' },
       { id: 'first-pass-yield', label: 'First Pass Yield' },
@@ -94,6 +96,8 @@ export default function App() {
       <Header pages={PAGES} activePage={activePage} onNavigate={setActivePage} />
 
       {activePage === 'mo' && <MoLookupPage onProceedToCompare={proceedToCompare} />}
+
+      {activePage === 'create-new-bom' && <CreateNewBomPage />}
 
       {activePage === 'tpg-check' && <TpgCheckPage />}
 
