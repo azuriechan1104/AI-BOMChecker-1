@@ -9,7 +9,6 @@
     "build": "npm run build --prefix Frontend"
   },
   "main": "index.js",
-  "devDependencies": {},
   "repository": {
     "type": "git",
     "url": "git+https://github.com/haziqahesa11/AI-BOMChecker.git"
@@ -21,5 +20,8 @@
   "bugs": {
     "url": "https://github.com/haziqahesa11/AI-BOMChecker/issues"
   },
-  "homepage": "https://github.com/haziqahesa11/AI-BOMChecker#readme"
+  "homepage": "https://github.com/haziqahesa11/AI-BOMChecker#readme",
+  "dependencies": {
+    "vite": "^8.3.1"
+  }
 }
