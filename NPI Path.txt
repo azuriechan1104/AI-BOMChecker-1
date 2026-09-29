@@ -1,0 +1,18 @@
+Credentials:
+User: engineer
+pass: p@ssw0rd
+
+IP address: 10.251.231.79
+
+Path informations:
+engineer@WYMY-NEXA:~/AI_BOM/data/NPI_Files/MSF$ ls
+'(Confidential) Wiwynn Internal Factory WTP flow-20231218.pptx'
+'FAI Report Requirement'
+'Gen 10'
+'Gen 11'
+'Gen 8'
+'Gen 9'
+'H00594_Restricted_Substances_for_Hardware_Products_REV AV.docx'
+'H00642_Microsoft_Restricted_Substances_Control_Sys_REV AF.docx'
+'Monica CRD Tracker(Masterlist).csv'
+NpiLibrary

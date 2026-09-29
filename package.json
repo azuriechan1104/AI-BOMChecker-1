@@ -6,7 +6,8 @@
   "scripts": {
     "start": "npm start --prefix BackEnd",
     "dev": "npm run dev --prefix BackEnd",
-    "build": "npm run build --prefix Frontend"
+    "build": "npm run build --prefix Frontend",
+    "db:bomguard": "node BackEnd/scripts/load-bomguard-files.js"
   },
   "main": "index.js",
   "repository": {

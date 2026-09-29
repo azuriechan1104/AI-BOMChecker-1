@@ -104,4 +104,4 @@ annonWritePool.on('error', (err) => {
   console.error('Unexpected error on idle Postgres client (annonWritePool):', err);
 });
 
-module.exports = { sql, getPool, query, closePool, annonPool, annonWritePool, sfcsPool };
+module.exports = { sql, getPool, query, closePool, annonPool, annonWritePool, sfcsPool, annonConnConfig };
